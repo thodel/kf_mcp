@@ -1,0 +1,18 @@
+services:
+  kf-mcp:
+    build: .
+    image: kf-mcp:latest
+    container_name: kf-mcp
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    volumes:
+      - /home/dh/kf_data:/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/sse')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

@@ -1,5 +1,5 @@
 """server.py — Königsfelden MCP server (FastMCP, HTTP SSE)."""
-import argparse, json, logging
+import argparse, logging
 from mcp.server.fastmcp import FastMCP
 import db as db_module
 

@@ -14,4 +14,4 @@ COPY build_db.py db.py server.py ./
 
 EXPOSE 8000
 
-CMD ["python", "server.py", "--db", "/data/hgb.db", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python", "server.py", "--db", "/data/kf.db", "--host", "0.0.0.0", "--port", "8001"]

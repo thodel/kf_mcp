@@ -26,8 +26,8 @@ def extract_text(elem):
     for c in elem: parts.append(extract_text(c)); parts.append(c.tail if c.tail else '')
     return ''.join(p for p in parts if p)
 
-def parse_entry(tree):
-    root=tree.getroot(); entry_id=root.get(XMLID,'')
+def parse_entry(tree, entry_id):
+    root=tree.getroot()
     hdr=root.find(f'.//{tag("teiHeader")}'); fd=hdr.find(f'.//{tag("fileDesc")}') if hdr is not None else None
     title=short_id=source=None; pages=[]
     if fd is not None:
@@ -144,7 +144,7 @@ def build(docs_dir, regs_dir, db_path, batch=200):
     for fpath in xml_files:
         fname=fpath.rsplit('/',1)[-1].rsplit('.',1)[0]
         try:
-            tree=ET.parse(fpath); entry,spans=parse_entry(tree); entry_rows.append(entry)
+            tree=ET.parse(fpath); entry,spans=parse_entry(tree,fname); entry_rows.append(entry)
             for s in spans: span_rows.append(s); n+=1
         except Exception as e: print(f"\n  Error {fname}: {e}",file=sys.stderr)
         if n%batch==0:

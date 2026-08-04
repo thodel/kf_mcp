@@ -1,6 +1,6 @@
 """db.py — SQLite helpers for Königsfelden MCP server."""
 import sqlite3
-from contextmanager import contextmanager
+from contextlib import contextmanager
 
 _DB_PATH = "kf.db"
 

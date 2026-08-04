@@ -16,6 +16,7 @@ Usage:
     python test_kf_mcp.py --unit --db /home/dh/kf_data/kf.db --server http://localhost:8001
 """
 import argparse, sys, tempfile, os, glob, sqlite3, json
+import pytest
 from pathlib import Path
 
 # ── Sample TEI fragment used for unit tests ────────────────────────────────────
@@ -189,6 +190,12 @@ def test_authority_parsers():
 
 # ── 3. DB build + query integration test ──────────────────────────────────────
 
+@pytest.fixture
+def db_path():
+    """Path to kf.db, read from --db CLI arg or KF_DB env var."""
+    return os.environ.get("KF_DB", "")
+
+@pytest.mark.usefixtures("db_path")
 def test_db_build_and_queries(db_path):
     """Full DB build from sample data, then run query checks."""
     if not os.path.exists(db_path):

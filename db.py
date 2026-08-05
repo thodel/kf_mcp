@@ -7,7 +7,10 @@ _DB_PATH = "kf.db"
 
 MAX_LIMIT = 500            # ceiling for any caller-supplied limit
 SPAN_LIMIT = 200           # spans attached to a single person/place record
-PERSON_INDEX_LIMIT = 9999  # rows in the kf://persons resource
+# Rows in the kf://persons resource. Kept well under the ~150k-character result
+# limit Claude.ai and Claude Desktop apply to a tool or resource payload: at 9999
+# rows this resource ran to roughly a megabyte and was silently unusable there.
+PERSON_INDEX_LIMIT = 1000
 
 def set_db_path(path):
     global _DB_PATH

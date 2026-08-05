@@ -1,0 +1,4 @@
+# Test-only dependencies. Deliberately not in requirements.txt so the runtime
+# image stays lean: pip install -r requirements-dev.txt
+-r requirements.txt
+pytest>=7.0

@@ -5,13 +5,18 @@ services:
     container_name: kf-mcp
     restart: unless-stopped
     ports:
-      - "8001:8001"
+      # Published on all interfaces by default. The server has no authentication, so
+      # if nginx (or another proxy) fronts it, set KF_BIND=127.0.0.1 to make it
+      # unreachable directly from the network.
+      - "${KF_BIND:-0.0.0.0}:8001:8001"
     volumes:
       - /home/dh/kf_data:/data
     environment:
       - PYTHONUNBUFFERED=1
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/sse')"]
+      # A plain TCP connect: opening /sse would start an MCP session and abandon it
+      # every 30 seconds.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('localhost', 8001), 3).close()"]
       interval: 30s
       timeout: 10s
       retries: 3

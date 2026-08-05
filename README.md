@@ -13,13 +13,18 @@ data/registers/                                            ├─► build_db.py
   people.xml  places.xml  organizations.xml               ─┘                  (SQLite + FTS5)
                                                                                    │
                                                                               server.py
-                                                                          (FastMCP / HTTP SSE)
+                                                                    (mcp 2.0 MCPServer / HTTP SSE)
                                                                                    │
                                                                     http://<host>:8001/sse
 ```
 
 The TEI sources are parsed once into a SQLite database with two FTS5 indexes. The server
 then runs stateless read-only queries against it (`PRAGMA query_only`).
+
+The server targets **mcp 2.0**, which renamed the high-level server class
+(`FastMCP` → `MCPServer`), removed `mcp.server.fastmcp`, and moved the bind address from
+the constructor into `run()`; `requirements.txt` pins the major version accordingly. The
+SSE endpoint is unchanged, so deployed clients keep working.
 
 Entity identifiers come from the TEI `xml:id` attributes — persons `perXXXXXX`, places
 `locXXXXXX`, organisations `orgXXXX`. Person and place records additionally carry HLS

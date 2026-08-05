@@ -1,22 +1,24 @@
 """server.py — Königsfelden MCP server (FastMCP, HTTP SSE)."""
-import argparse, json, logging
+import argparse, json, logging, os
 from mcp.server.fastmcp import FastMCP
 import db as db_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-ap = argparse.ArgumentParser()
-ap.add_argument("--db",   default="/data/kf.db",  help="Path to kf.db")
-ap.add_argument("--host", default="0.0.0.0")
-ap.add_argument("--port", type=int, default=8001)
-args = ap.parse_args()
-db_module.set_db_path(args.db)
+# Defaults come from the environment so that importing this module never touches
+# sys.argv — argparse at import time would hijack the arguments of any process that
+# imports the server (tests, an ASGI loader). The CLI overrides these in main().
+DEFAULT_DB   = os.environ.get("KF_DB", "/data/kf.db")
+DEFAULT_HOST = os.environ.get("KF_HOST", "0.0.0.0")
+DEFAULT_PORT = int(os.environ.get("KF_PORT", "8001"))
+
+db_module.set_db_path(DEFAULT_DB)
 
 mcp = FastMCP(
     name="Königsfelden",
-    host=args.host,
-    port=args.port,
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
     instructions=(
         "Königsfelden monastic records (1300–1658), edited by the project "
         "'Die Urkunden und Akten des Klosters und der Hofmeisterei Königsfelden'. "
@@ -110,12 +112,8 @@ def resource_stats() -> str:
 
 @mcp.resource("kf://persons")
 def resource_persons() -> str:
-    """Brief person index: id, name, occupation."""
-    with db_module.conn() as c:
-        rows = c.execute(
-            "SELECT id,main_name,occupation,hls_id FROM persons ORDER BY id LIMIT 9999"
-        ).fetchall()
-    return json.dumps(db_module.r(rows), indent=2)
+    """Brief person index: id, name, occupation, HLS id. Flags its own truncation."""
+    return json.dumps(db_module.person_index(), indent=2, ensure_ascii=False)
 
 @mcp.resource("kf://entry/{entry_id}")
 def resource_entry(entry_id: str) -> str:
@@ -126,7 +124,19 @@ def resource_entry(entry_id: str) -> str:
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def parse_args(argv=None):
+    ap = argparse.ArgumentParser(description="Königsfelden MCP server")
+    ap.add_argument("--db",   default=DEFAULT_DB,   help="Path to kf.db (env KF_DB)")
+    ap.add_argument("--host", default=DEFAULT_HOST, help="Bind address (env KF_HOST)")
+    ap.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port (env KF_PORT)")
+    return ap.parse_args(argv)
+
+def main(argv=None):
+    args = parse_args(argv)
+    db_module.set_db_path(args.db)
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
+
     logger.info(f"Database: {args.db}")
     try:
         s = db_module.stats()
@@ -135,3 +145,6 @@ if __name__ == "__main__":
         logger.warning(f"Could not read DB stats: {e}")
     logger.info(f"Starting KF MCP server on {args.host}:{args.port}")
     mcp.run(transport="sse")
+
+if __name__ == "__main__":
+    main()

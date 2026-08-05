@@ -510,7 +510,7 @@ def test_db_layer_against_real_db(db_path):
 
 def _tool_payload(result):
     """Unwrap a CallToolResult into a Python object."""
-    structured = getattr(result, "structuredContent", None)
+    structured = getattr(result, "structured_content", None)
     if structured:
         return structured.get("result", structured)
     for block in getattr(result, "content", []):
@@ -560,12 +560,12 @@ def test_server(base_url):
                     ("get_entries_by_year", {"year_from": 1350, "year_to": 1360}),
                 ]:
                     res = await session.call_tool(tool, args)
-                    tr.check(not res.isError, f"{tool} call succeeded")
+                    tr.check(not res.is_error, f"{tool} call succeeded")
                     tr.check(_tool_payload(res) is not None, f"{tool} returned a payload")
 
                 # Hostile input must come back as data, not a transport error
                 res = await session.call_tool("search_fulltext", {"query": 'Heinrich"', "limit": 3})
-                tr.check(not res.isError, "search_fulltext survives an unbalanced quote")
+                tr.check(not res.is_error, "search_fulltext survives an unbalanced quote")
 
                 res = await session.call_tool("get_entry", {"entry_id": "definitely_not_an_id"})
                 payload = _tool_payload(res)

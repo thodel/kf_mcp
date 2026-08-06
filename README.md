@@ -13,9 +13,10 @@ data/registers/                                            ├─► build_db.py
   people.xml  places.xml  organizations.xml               ─┘                  (SQLite + FTS5)
                                                                                    │
                                                                               server.py
-                                                                    (mcp 2.0 MCPServer / HTTP SSE)
+                                                              (mcp 2.0 MCPServer,
+                                                               streamable HTTP)
                                                                                    │
-                                                                    http://<host>:8001/sse
+                                                                    http://<host>:8001/mcp
 ```
 
 The TEI sources are parsed once into a SQLite database with two FTS5 indexes. The server
@@ -23,8 +24,14 @@ then runs stateless read-only queries against it (`PRAGMA query_only`).
 
 The server targets **mcp 2.0**, which renamed the high-level server class
 (`FastMCP` → `MCPServer`), removed `mcp.server.fastmcp`, and moved the bind address from
-the constructor into `run()`; `requirements.txt` pins the major version accordingly. The
-SSE endpoint is unchanged, so deployed clients keep working.
+the constructor into `run()`; `requirements.txt` pins the major version accordingly.
+
+**The transport is streamable HTTP** (`/mcp`), not the legacy HTTP+SSE (`/sse`) this
+server used previously. SSE is deprecated, and — more practically — its handshake hands
+the client an absolute `/messages/` path computed from the app's own mount point, which
+a client cannot reach when the server sits under a reverse-proxy sub-path. Streamable
+HTTP has one endpoint and no such handshake. **Existing clients pointed at `/sse` must
+be repointed at the new endpoint;** it is a deliberate cutover, not a compatible change.
 
 Entity identifiers come from the TEI `xml:id` attributes — persons `perXXXXXX`, places
 `locXXXXXX`, organisations `orgXXXX`. Person and place records additionally carry HLS
@@ -65,9 +72,12 @@ completes normally.
 python server.py --db kf.db --host 0.0.0.0 --port 8001
 ```
 
-Each flag also has an environment variable — `KF_DB`, `KF_HOST`, `KF_PORT` — which the
-flags override. Importing `server.py` never reads `sys.argv`, so it is safe to import
-from tests or an ASGI loader.
+Each flag also has an environment variable — `KF_DB`, `KF_HOST`, `KF_PORT`,
+`KF_HTTP_PATH` — which the flags override. Importing `server.py` never reads `sys.argv`,
+so it is safe to import from tests or an ASGI loader.
+
+`--http-path` (default `/mcp`) is the path the MCP endpoint is served at. **Behind a
+reverse proxy, set it to the public path** — see [Reverse proxy](#reverse-proxy-nginx).
 
 ### 4. Connect a client
 
@@ -77,7 +87,8 @@ Add to your `claude_desktop_config.json` (or equivalent):
 {
   "mcpServers": {
     "kf": {
-      "url": "http://<server-ip>:8001/sse"
+      "url": "http://<server-ip>:8001/mcp",
+      "transport": "streamable-http"
     }
   }
 }
@@ -86,7 +97,7 @@ Add to your `claude_desktop_config.json` (or equivalent):
 Or for Claude Code:
 
 ```bash
-claude mcp add kf --transport sse --url http://<server-ip>:8001/sse
+claude mcp add kf --transport http --url http://<server-ip>:8001/mcp
 ```
 
 ---
@@ -117,24 +128,55 @@ docker compose up -d
 The container serves on port 8001 and expects `kf.db` at `/data/kf.db`. Adjust the volume
 path in `docker-compose.yml` if your data lives elsewhere.
 
-### Reverse proxy (nginx, optional but recommended)
+### Reverse proxy (nginx)
+
+<a id="reverse-proxy-nginx"></a>
+
+Serving under a sub-path (`https://tei.example.ch/mcp/kf/mcp`) has exactly one rule:
+**the app's `--http-path` and the nginx `location` must be the same string.** The
+endpoint is one path that answers `POST` (requests), `GET` (the server→client stream),
+and `DELETE` (session teardown); it builds no URLs of its own, so all nginx has to do is
+forward the path unchanged.
 
 ```nginx
 server {
     listen 443 ssl;
-    server_name kf-mcp.example.unibe.ch;
+    server_name tei.example.ch;
 
-    location / {
-        proxy_pass         http://localhost:8001;
+    # KF_HTTP_PATH=/mcp/kf/mcp — same string, no trailing slash on proxy_pass,
+    # so the path reaches the app unrewritten.
+    location /mcp/kf/mcp {
+        proxy_pass         http://127.0.0.1:8001;
         proxy_http_version 1.1;
-        # Required for SSE
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        # The GET stream must not be buffered or timed out mid-session.
         proxy_set_header   Connection '';
         proxy_buffering    off;
         proxy_cache        off;
+        proxy_read_timeout 3600s;
         chunked_transfer_encoding on;
     }
 }
 ```
+
+Two failure modes worth knowing, both of which return a bare `Not Found` or `405`:
+
+- **A trailing slash on `proxy_pass`** (`http://127.0.0.1:8001/`) strips the location
+  prefix, so the app sees `/` and no route matches.
+- **`location` and `--http-path` disagree** — the app 404s every request. Check the
+  startup line, which prints the exact path being served:
+  `Starting KF MCP server on 0.0.0.0:8001/mcp/kf/mcp`.
+
+Verify from outside before wiring up a client:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST https://tei.example.ch/mcp/kf/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+```
+
+`200` means the endpoint is live. `404` is a path mismatch, `405` means nginx is not
+passing `POST` to the app (a static `location` or a `limit_except` is shadowing it).
 
 > **Note:** the server has no authentication. By default `docker-compose.yml` publishes
 > port 8001 on all interfaces; if a proxy fronts it, bind it to loopback instead so the
@@ -170,7 +212,7 @@ server {
 | URI | Description |
 |-----|-------------|
 | `kf://stats` | Corpus statistics (JSON) |
-| `kf://persons` | Person index — `{total, returned, truncated, persons: [...]}`, capped at 9999 rows and flagged when truncated |
+| `kf://persons` | Person index — `{total, returned, truncated, persons: [...]}`, capped at 1000 rows and flagged when truncated |
 | `kf://entry/{entry_id}` | Single entry (JSON) |
 
 ## Query behaviour
@@ -178,6 +220,11 @@ server {
 **Limits.** Every `limit` is clamped to at most 500; a negative, zero, or non-numeric
 value falls back to that tool's own default rather than returning the whole table. Use
 `list_entries(limit, offset)` to page through the full corpus.
+
+**Result size.** Claude.ai and Claude Desktop truncate a tool or resource result at
+roughly 150,000 characters. `kf://persons` is capped at 1000 rows (about 100 KB) for
+that reason and reports its own truncation; the 500-row tool ceiling stays comfortably
+under the limit too.
 
 **Full-text search.** `search_fulltext` passes the query to FTS5, so operators work —
 `Brugg OR Königsfelden`, `Heinr*`, `NEAR(...)`. If the query isn't valid FTS5 syntax

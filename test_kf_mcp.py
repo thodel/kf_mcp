@@ -405,6 +405,27 @@ def test_person_index_reports_truncation():
     tr.assert_ok()
 
 
+def test_http_path_is_normalised():
+    """The endpoint path must match the public path exactly, however it is written.
+
+    A sub-path deployment 404s when the app is mounted at /mcp while nginx forwards
+    /mcp/kf/mcp, so this is the knob that has to be right."""
+    pytest.importorskip("mcp", reason="mcp SDK not installed")
+    import server as server_module
+
+    tr = Checks()
+    n = server_module.normalise_path
+    tr.check(n("/mcp/kf/mcp") == "/mcp/kf/mcp", "an already-correct path is unchanged")
+    tr.check(n("mcp/kf/mcp") == "/mcp/kf/mcp", "a missing leading slash is added")
+    tr.check(n("/mcp/kf/mcp/") == "/mcp/kf/mcp", "a trailing slash is dropped")
+    tr.check(n("") == "/mcp" and n(None) == "/mcp", "an empty path falls back to /mcp")
+
+    tr.check(server_module.parse_args([]).http_path == "/mcp", "default endpoint path is /mcp")
+    args = server_module.parse_args(["--http-path", "mcp/kf/mcp/"])
+    tr.check(args.http_path == "/mcp/kf/mcp", "--http-path is normalised on the way in")
+    tr.assert_ok()
+
+
 # ── 3. DB query integration test ──────────────────────────────────────────────
 
 def test_db_build_and_queries(db_path):
@@ -522,13 +543,13 @@ def _tool_payload(result):
 
 
 def test_server(base_url):
-    """Drive the running server over MCP SSE using the official client."""
+    """Drive the running server over streamable HTTP using the official client."""
     if not base_url:
         pytest.skip("no server URL — set KF_SERVER or pass --server")
     try:
         import anyio
         from mcp import ClientSession
-        from mcp.client.sse import sse_client
+        from mcp.client.streamable_http import streamable_http_client
     except ImportError as e:
         pytest.skip(f"mcp client library not available: {e}")
 
@@ -536,11 +557,16 @@ def test_server(base_url):
     expected = {"corpus_stats", "list_entries", "get_entry", "search_persons", "get_person",
                 "search_places", "get_place", "search_orgs", "search_fulltext",
                 "get_entries_for_person", "get_entries_for_place", "get_entries_by_year"}
+    # KF_SERVER may be the bare origin (local run) or the full public endpoint
+    # (https://host/mcp/kf/mcp). Only append the default path to the former.
+    url = base_url.rstrip("/")
+    if not url.rsplit("/", 1)[-1] == "mcp":
+        url += "/mcp"
 
     async def exercise():
-        # MCP SSE is a session protocol: GET /sse yields a per-session message
-        # endpoint and replies arrive on the stream. Hand-rolled POSTs cannot work.
-        async with sse_client(f"{base_url}/sse", timeout=10, sse_read_timeout=30) as (read, write):
+        # Streamable HTTP is a session protocol: the server issues a session id on
+        # initialize and expects it on every later POST. Hand-rolled POSTs cannot work.
+        async with streamable_http_client(url) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
 
@@ -627,13 +653,14 @@ if __name__ == "__main__":
         ok_all &= cli_run("[7] Unit: LIKE wildcards are escaped", test_like_wildcards_are_escaped)
         ok_all &= cli_run("[8] Unit: person index reports truncation",
                           test_person_index_reports_truncation)
+        ok_all &= cli_run("[9] Unit: endpoint path is normalised", test_http_path_is_normalised)
 
     if args.db:
-        ok_all &= cli_run(f"[9] DB: query integration ({args.db})", test_db_build_and_queries, args.db)
-        ok_all &= cli_run(f"[10] DB: db.py query layer ({args.db})", test_db_layer_against_real_db, args.db)
+        ok_all &= cli_run(f"[10] DB: query integration ({args.db})", test_db_build_and_queries, args.db)
+        ok_all &= cli_run(f"[11] DB: db.py query layer ({args.db})", test_db_layer_against_real_db, args.db)
 
     if args.server:
-        ok_all &= cli_run(f"[11] Server: MCP integration ({args.server})", test_server, args.server)
+        ok_all &= cli_run(f"[12] Server: MCP integration ({args.server})", test_server, args.server)
 
     print(f"\n{'═'*50}")
     print(f"{GREEN}ALL PASSED{RESET}" if ok_all else f"{RED}FAILURES{RESET}")

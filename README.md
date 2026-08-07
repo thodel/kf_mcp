@@ -272,6 +272,18 @@ date have `year = NULL`.
 | `orgs` | id, name, desc_de, desc_fr |
 | `fts_entries`, `fts_spans` | FTS5 indexes (external content, populated by AFTER INSERT triggers at build time — there are no update/delete triggers, which is why a rebuild clears and repopulates) |
 
+## Deployment
+
+This server runs on `tei.dh.unibe.ch` at
+**`https://tei.dh.unibe.ch/mcp/kf/mcp`**, alongside four sibling MCP servers:
+[SSRQ](https://github.com/thodel/ssrq_mcp), [HLS](https://github.com/thodel/hls_mcp), [HBLS](https://github.com/thodel/hbls_mcp), [EOS / HGB Basel](https://github.com/thodel/eos_mcp).
+
+What they share — the nginx routing, the landing pages, and the deploy sequence —
+lives in **[tei_mcp_ops](https://github.com/thodel/tei_mcp_ops)**. Start there for
+anything that spans the fleet; in particular, the app's `--http-path` and the nginx
+`location` have to be the same string, which is the rule a sub-path deployment turns
+on.
+
 ## Tests
 
 ```bash

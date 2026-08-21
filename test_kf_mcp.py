@@ -665,3 +665,159 @@ if __name__ == "__main__":
     print(f"\n{'═'*50}")
     print(f"{GREEN}ALL PASSED{RESET}" if ok_all else f"{RED}FAILURES{RESET}")
     sys.exit(0 if ok_all else 1)
+
+
+# ── Semantic search ──────────────────────────────────────────────────────────
+#
+# No test here calls GPUStack: vectors are synthesised, so the suite runs off
+# the UniBE VPN and in CI.
+
+import db as _db
+import embeddings as emb
+
+
+def _vocab(*texts):
+    return emb.build_vocab(texts)
+
+
+# The corpus transcribes diplomatically: every abbreviated word appears as the
+# raw manuscript form immediately followed by the editor's expansion. These
+# cases are all taken from the real text.
+
+def test_a_raw_form_that_is_a_whole_word_is_replaced_by_its_reading():
+    vocab = _vocab("un̄ und dez jares " * 6)
+    assert emb.clean_entry_text("un̄ und dez jares", vocab) == "und dez jares"
+
+
+def test_a_raw_form_that_continues_a_fragment_is_joined():
+    # "Heinrich" is written "Hein" + raw "r₎" + "rich".
+    corpus = ["nante Hein r₎ rich Swab"] * 8 + ["der Hein hiez"]
+    assert "Heinrich" in emb.clean_entry_text(corpus[0], _vocab(*corpus))
+
+
+def test_a_real_word_before_an_expansion_is_not_glued_to_it():
+    # "Diz ist dˀ der" must become "Diz ist der", never "Diz istder".
+    corpus = ["Diz ist dˀ der brief"] + ["ist"] * 40
+    out = emb.clean_entry_text(corpus[0], _vocab(*corpus))
+    assert out == "Diz ist der brief"
+
+
+def test_a_frequent_token_can_still_be_a_fragment():
+    # "Hein" is also a name, so a rare/common threshold cannot decide this;
+    # the ratio of fragment to solo occurrences can.
+    corpus = ["Hein r₎ rich"] * 20 + ["der Hein kam"] * 3
+    vocab = _vocab(*corpus)
+    fragment, solo = vocab["hein"]
+    assert fragment > solo
+    assert emb.clean_entry_text("Hein r₎ rich", vocab) == "Heinrich"
+
+
+def test_combining_diacritics_do_not_block_a_join():
+    # "Oͤs" is O + U+0364 + s; str.isalpha() is False for the combining mark.
+    corpus = ["von Oͤs tˀ ter rich"] * 6
+    assert "Oͤster" in emb.clean_entry_text(corpus[0], _vocab(*corpus))
+
+
+def test_segment_markers_are_dropped():
+    vocab = _vocab("dem lechenman gibt man")
+    assert "✳" not in emb.clean_entry_text("dem ✳ lechenman ✳ gibt", vocab)
+
+
+def test_a_trailing_raw_form_with_no_expansion_is_dropped():
+    assert emb.clean_entry_text("der hof d₎", _vocab("der hof")) == "der hof"
+
+
+def test_cleaning_empty_text_is_safe():
+    assert emb.clean_entry_text("", {}) == ""
+    assert emb.clean_entry_text(None, {}) == ""
+
+
+def test_vocabulary_separates_fragments_from_words():
+    vocab = _vocab("Hein r₎ rich und ist gut", "ist ist ist und und")
+    assert vocab["hein"] == (1, 0)      # only ever before a raw form
+    assert vocab["ist"][1] > vocab["ist"][0]
+
+
+# ── Vector search ────────────────────────────────────────────────────────────
+
+def _semantic_db(tmp_path):
+    """A corpus with hand-placed vectors, so expected ranking is arithmetic."""
+    path = str(tmp_path / "kf_sem.db")
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE entries(id TEXT PRIMARY KEY, title TEXT, short_id TEXT,
+                             year INTEGER, source TEXT, pages TEXT, text_raw TEXT);
+    """)
+    con.executescript(_db.EMBEDDING_SCHEMA_SQL)
+    rows = [("U-1", "Urkunde 1", 1360, [1.0, 0.0, 0.0]),
+            ("U-2", "Urkunde 2", 1450, [0.8, 0.6, 0.0]),
+            ("U-3", "Urkunde 3", 1644, [0.0, 1.0, 0.0])]
+    for eid, title, year, vec in rows:
+        con.execute("INSERT INTO entries(id,title,short_id,year,source,text_raw) "
+                    "VALUES (?,?,?,?,?,?)", (eid, title, eid, year, "ed.", "text"))
+        for index in (0, 1):
+            cid = f"{eid}#{index}"
+            con.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                        (cid, eid, index, 0, 10, f"{title} Passage {index}"))
+            con.execute("INSERT INTO embeddings VALUES (?,?,?,?)",
+                        (cid, "test-model", 3, emb.pack(vec)))
+    con.commit(); con.close()
+    _db._VECTOR_CACHE.clear()
+    _db.set_db_path(path)
+    return path
+
+
+def test_passages_rank_by_cosine_similarity(tmp_path):
+    _semantic_db(tmp_path)
+    hits = _db.search_semantic([1.0, 0.0, 0.0], limit=3, model="test-model",
+                               per_entry=1)
+    assert [h["id"] for h in hits] == ["U-1", "U-2", "U-3"]
+    assert hits[0]["score"] > hits[1]["score"]
+
+
+def test_one_charter_cannot_fill_the_result_set(tmp_path):
+    _semantic_db(tmp_path)
+    hits = _db.search_semantic([1.0, 0.0, 0.0], limit=6, model="test-model",
+                               per_entry=1)
+    assert len({h["id"] for h in hits}) == len(hits)
+
+
+def test_results_can_be_restricted_to_a_period(tmp_path):
+    # For this corpus the period is often the point of the question.
+    _semantic_db(tmp_path)
+    hits = _db.search_semantic([1.0, 0.0, 0.0], limit=6, model="test-model",
+                               year_from=1400, year_to=1500)
+    assert {h["year"] for h in hits} == {1450}
+
+
+def test_hits_carry_what_a_citation_needs(tmp_path):
+    _semantic_db(tmp_path)
+    hit = _db.search_semantic([1.0, 0.0, 0.0], limit=1, model="test-model")[0]
+    for field in ("id", "chunk_id", "short_id", "year", "char_start", "score"):
+        assert field in hit, field
+
+
+def test_a_dimension_mismatch_is_reported_not_silently_wrong(tmp_path):
+    _semantic_db(tmp_path)
+    with pytest.raises(ValueError, match="dimensions"):
+        _db.search_semantic([1.0, 0.0], limit=1, model="test-model")
+
+
+def test_an_unindexed_model_says_how_to_fix_it(tmp_path):
+    _semantic_db(tmp_path)
+    with pytest.raises(RuntimeError, match="embed_db"):
+        _db.search_semantic([1.0, 0.0, 0.0], limit=1, model="never-run")
+
+
+def test_warm_reports_size_rather_than_raising(tmp_path):
+    _semantic_db(tmp_path)
+    warm = _db.warm_semantic_index("test-model")
+    assert warm["ready"] and warm["n_chunks"] == 6
+    assert _db.warm_semantic_index("never-run")["ready"] is False
+
+
+def test_semantic_stats_report_coverage(tmp_path):
+    _semantic_db(tmp_path)
+    stats = _db.semantic_stats()
+    assert stats["indexed"] and stats["coverage"] == 1.0
+    assert stats["n_entries_indexed"] == 3

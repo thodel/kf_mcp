@@ -2,6 +2,7 @@
 import argparse, json, logging, os
 from mcp.server.mcpserver import MCPServer
 import db as db_module
+import embeddings as emb_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -97,6 +98,39 @@ def search_orgs(query: str, limit: int = 50) -> list[dict]:
     return db_module.search_orgs(query, limit)
 
 @mcp.tool()
+def search_semantic(query: str, limit: int = 10,
+                    year_from: int = 0, year_to: int = 0) -> list[dict]:
+    """Find charter passages that answer a natural-language question, by meaning.
+
+    Ask in modern German, French or English — this does not need the query's
+    words to appear in the text, which matters here more than in a modern
+    corpus: the transcriptions are 14th–17th century Alemannic and Latin, so
+    keyword search only reaches them if you already know the historical
+    spelling. Each hit is one passage of the *expanded* reading (abbreviations
+    resolved), with `score` the cosine similarity and `id` its entry.
+
+    Optionally restrict to a period with year_from / year_to.
+    """
+    try:
+        vector = emb_module.embed_query(query)
+    except emb_module.EmbeddingError as exc:
+        return [{"error": str(exc)}]
+    try:
+        return db_module.search_semantic(
+            vector, limit=limit,
+            year_from=year_from or None, year_to=year_to or None)
+    except (RuntimeError, ValueError) as exc:
+        return [{"error": str(exc)}]
+
+
+@mcp.tool()
+def semantic_index_stats() -> dict:
+    """Coverage and provenance of the semantic index: how much of the corpus is
+    embedded, with which model, and by which run."""
+    return db_module.semantic_stats()
+
+
+@mcp.tool()
 def search_fulltext(query: str, limit: int = 20) -> list[dict]:
     """Full-text search across all document transcriptions. Returns snippets with highlights."""
     return db_module.search_fulltext(query, limit)
@@ -162,6 +196,15 @@ def main(argv=None):
         logger.info(f"Corpus: {s['n_entries']:,} entries, {s['n_persons']:,} persons, {s['n_places']:,} places")
     except Exception as e:
         logger.warning(f"Could not read DB stats: {e}")
+    # Load the vectors now: the first user question should not be the request
+    # that waits for the matrix to be assembled.
+    warm = db_module.warm_semantic_index(emb_module.DEFAULT_MODEL)
+    if warm.get("ready"):
+        logger.info(f"Semantic index: {warm['n_chunks']:,} chunks, {warm['dims']}d, "
+                    f"{warm['megabytes']} MB in memory ({warm['model']})")
+    else:
+        logger.warning(f"Semantic search unavailable: {warm.get('reason')}")
+
     logger.info(f"Starting KF MCP server on {args.host}:{args.port}{args.http_path}")
     mcp.run(transport="streamable-http", host=args.host, port=args.port,
             streamable_http_path=args.http_path)

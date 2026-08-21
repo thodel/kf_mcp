@@ -310,3 +310,67 @@ python test_kf_mcp.py --unit --db /home/dh/kf_data/kf.db --server http://localho
 
 Note that the DB tests assert corpus-size floors (≥1550 entries, ≥5000 persons, ≥1300
 places, ≥2000 orgs) — they will fail against a small sample database.
+
+## Semantic search
+
+`search_fulltext` finds entries containing the words you typed. `search_semantic`
+finds passages that *mean* what you asked — which matters more here than in a modern
+corpus. The transcriptions are 14th–17th century Alemannic and Latin, so a question
+like *"wer hat den Hof Lind gepachtet?"* shares almost no surface forms with
+*"wellchen der hof Lind soll hingelichen werden"*. Keyword search reaches this
+material only if you already know how it was spelled.
+
+### The expanded reading
+
+The edition transcribes diplomatically: segment boundaries are marked `✳` (82,062 of
+them), and every abbreviated word appears as the raw manuscript form immediately
+followed by the editor's expansion.
+
+| transcription | reading |
+|---|---|
+| `un̄ und` | und — the raw form is a whole word |
+| `Hein r₎ rich` | Heinrich — the raw form continues a fragment |
+| `stif tˀin terin` | stifterin |
+| `Diz ist dˀ der` | Diz ist der |
+
+Embedded as written, this is close to unusable: names arrive split in half, every
+abbreviated word is doubled, and the segment markers punctuate the text at random.
+**Passages therefore hold the expanded reading**, not the raw transcription.
+
+Whether an expansion joins the token before it depends on whether that token is
+already a word — "ist" is, "Hein" and "stif" are not. Counting occurrences does not
+separate them, because "Hein" recurs constantly (the name is abbreviated the same way
+every time), and neither does a rare/common threshold, because "Hein" is also a name.
+What does separate them is the *ratio* of fragment to standalone occurrences, which
+the corpus supplies itself — better than a word list for a language with no settled
+orthography.
+
+`search_fulltext` still searches the raw transcription, so an exact historical string
+remains findable.
+
+### Building the index
+
+```bash
+GPUSTACK_API_KEY=... python embed_db.py             # whole corpus
+GPUSTACK_API_KEY=... python embed_db.py --limit 100 # trial run on a sample
+GPUSTACK_API_KEY=... python embed_db.py --recompute # after changing the model
+```
+
+Entries are windowed into ~1000-character passages (150 overlap), each prefixed with
+its title and year — a charter passage otherwise carries no trace of which document
+or century it belongs to, and "the farm at Lind" reads the same in 1360 as in 1644.
+Embedding uses `qwen3-embedding-0.6b` on GPUStack (1024 dimensions); vectors are
+stored L2-normalised as float32 BLOBs, so search is one exact matrix multiply.
+
+Runs are resumable — chunks already embedded with the same model are skipped, each
+batch is committed — and recorded in `embedding_runs` with model, dimensions and
+window settings.
+
+### Query-time requirements
+
+The server embeds the incoming query, so it needs `GPUSTACK_API_KEY` at runtime even
+though passage vectors are already in the database. GPUStack is reachable only from
+inside the UniBE network; from outside it returns **403 before checking the key**, so
+a 403 means the wrong network, not a bad credential. Without a key the other tools
+work normally and `search_semantic` returns an explanatory error.
+

@@ -1,3 +1,8 @@
 # mcp 2.0 renamed the high-level server class (FastMCP → MCPServer) and dropped
 # mcp.server.fastmcp, so the major version is pinned deliberately.
 mcp>=2.0.0,<3
+
+# Semantic search: numpy holds the vector matrix and does the similarity
+# multiply; openai is the client for the GPUStack embedding endpoint.
+numpy>=1.24
+openai>=1.30

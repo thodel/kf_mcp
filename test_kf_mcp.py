@@ -597,6 +597,10 @@ def test_server(base_url):
                 payload = _tool_payload(res)
                 tr.check(isinstance(payload, dict) and "error" in payload,
                          f"unknown entry_id returns an error object (got {payload})")
+                # Der Text allein ist nicht maschinell von einem Ausfall zu
+                # unterscheiden; das Feld ist es (ch-h-bot#497).
+                tr.check(isinstance(payload, dict) and payload.get("not_found") is True,
+                         f"unknown entry_id says so in `not_found` (got {payload})")
 
                 resources = {str(r.uri) for r in (await session.list_resources()).resources}
                 tr.check("kf://stats" in resources, f"kf://stats resource listed (got {sorted(resources)})")

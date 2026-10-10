@@ -63,7 +63,10 @@ def get_entry(entry_id: str) -> dict:
     """Full entry: title, year, source, and all named-entity spans."""
     result = db_module.get_entry(entry_id)
     if not result:
-        return {"error": f"Entry '{entry_id}' not found."}
+        # `not_found`: «kenne ich nicht» maschinell von einem Ausfall zu
+        # unterscheiden (ch-h-bot#497). Der Text bleibt, weil dieser Server
+        # auch direkt von Menschen und Modellen gefragt wird.
+        return {"error": f"Entry '{entry_id}' not found.", "not_found": True}
     return result
 
 @mcp.tool()
@@ -76,7 +79,7 @@ def get_person(pid: str) -> dict:
     """Person authority record with HLS id, occupation, birth/death, and all entry mentions."""
     result = db_module.get_person(pid)
     if not result:
-        return {"error": f"Person '{pid}' not found."}
+        return {"error": f"Person '{pid}' not found.", "not_found": True}
     return result
 
 @mcp.tool()
@@ -89,7 +92,7 @@ def get_place(pid: str) -> dict:
     """Place authority record with geo, HLS id, GND id, and all entry mentions."""
     result = db_module.get_place(pid)
     if not result:
-        return {"error": f"Place '{pid}' not found."}
+        return {"error": f"Place '{pid}' not found.", "not_found": True}
     return result
 
 @mcp.tool()
@@ -169,7 +172,8 @@ def resource_persons() -> str:
 def resource_entry(entry_id: str) -> str:
     result = db_module.get_entry(entry_id)
     if not result:
-        return json.dumps({"error": f"Entry '{entry_id}' not found."})
+        return json.dumps({"error": f"Entry '{entry_id}' not found.",
+                           "not_found": True})
     return json.dumps(result, indent=2, ensure_ascii=False)
 
 # ── Entry point ───────────────────────────────────────────────────────────────

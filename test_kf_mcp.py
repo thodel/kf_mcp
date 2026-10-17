@@ -628,6 +628,45 @@ def cli_run(label, fn, *fn_args):
         return False
 
 
+# ── The vendored embeddings.py ───────────────────────────────────────────────
+
+@pytest.mark.parametrize("entry", ["server", "embed_db"])
+def test_the_vendored_embeddings_read_the_kf_settings(entry):
+    # embeddings.py is byte-identical across the fleet and finds KF_EMBED_MODEL
+    # and the other KF_* settings only through MCP_ENV_PREFIX, which corpus.py
+    # sets before importing it. Without that, an override would be read by
+    # nothing and queries would be embedded with a model the index was not
+    # built with.
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if k != "MCP_ENV_PREFIX"}
+    env["KF_EMBED_MODEL"] = "probe-model"
+    out = subprocess.run(
+        [sys.executable, "-c",
+         f"import {entry}, embeddings; print(embeddings.ENV_PREFIX, embeddings.DEFAULT_MODEL)"],
+        cwd=os.path.dirname(os.path.abspath(__file__)), env=env,
+        capture_output=True, text=True)
+    assert out.stdout.split() == ["KF", "probe-model"], out.stderr
+
+
+def test_queries_carry_this_corpus_instruction():
+    # The shared embed_query only knows "Swiss history"; corpus.embed_query
+    # keeps the instruction this index has always been queried with.
+    import corpus as corpus_module
+    seen = {}
+
+    class FakeClient:
+        class embeddings:
+            @staticmethod
+            def create(model, input):
+                seen["input"] = input
+                return type("R", (), {"data": [type("D", (), {"embedding": [1.0, 0.0]})()]})()
+
+    corpus_module.embed_query("Wer?", client=FakeClient())
+    assert seen["input"][0].startswith("Instruct:")
+    assert "Königsfelden" in seen["input"][0]
+    assert seen["input"][0].endswith("Wer?")
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="KF MCP test suite")
     ap.add_argument("--unit", action="store_true", help="Run unit tests")
@@ -677,11 +716,12 @@ if __name__ == "__main__":
 # the UniBE VPN and in CI.
 
 import db as _db
+import corpus as corpus_module
 import embeddings as emb
 
 
 def _vocab(*texts):
-    return emb.build_vocab(texts)
+    return corpus_module.build_vocab(texts)
 
 
 # The corpus transcribes diplomatically: every abbreviated word appears as the
@@ -690,19 +730,19 @@ def _vocab(*texts):
 
 def test_a_raw_form_that_is_a_whole_word_is_replaced_by_its_reading():
     vocab = _vocab("un̄ und dez jares " * 6)
-    assert emb.clean_entry_text("un̄ und dez jares", vocab) == "und dez jares"
+    assert corpus_module.clean_entry_text("un̄ und dez jares", vocab) == "und dez jares"
 
 
 def test_a_raw_form_that_continues_a_fragment_is_joined():
     # "Heinrich" is written "Hein" + raw "r₎" + "rich".
     corpus = ["nante Hein r₎ rich Swab"] * 8 + ["der Hein hiez"]
-    assert "Heinrich" in emb.clean_entry_text(corpus[0], _vocab(*corpus))
+    assert "Heinrich" in corpus_module.clean_entry_text(corpus[0], _vocab(*corpus))
 
 
 def test_a_real_word_before_an_expansion_is_not_glued_to_it():
     # "Diz ist dˀ der" must become "Diz ist der", never "Diz istder".
     corpus = ["Diz ist dˀ der brief"] + ["ist"] * 40
-    out = emb.clean_entry_text(corpus[0], _vocab(*corpus))
+    out = corpus_module.clean_entry_text(corpus[0], _vocab(*corpus))
     assert out == "Diz ist der brief"
 
 
@@ -713,27 +753,27 @@ def test_a_frequent_token_can_still_be_a_fragment():
     vocab = _vocab(*corpus)
     fragment, solo = vocab["hein"]
     assert fragment > solo
-    assert emb.clean_entry_text("Hein r₎ rich", vocab) == "Heinrich"
+    assert corpus_module.clean_entry_text("Hein r₎ rich", vocab) == "Heinrich"
 
 
 def test_combining_diacritics_do_not_block_a_join():
     # "Oͤs" is O + U+0364 + s; str.isalpha() is False for the combining mark.
     corpus = ["von Oͤs tˀ ter rich"] * 6
-    assert "Oͤster" in emb.clean_entry_text(corpus[0], _vocab(*corpus))
+    assert "Oͤster" in corpus_module.clean_entry_text(corpus[0], _vocab(*corpus))
 
 
 def test_segment_markers_are_dropped():
     vocab = _vocab("dem lechenman gibt man")
-    assert "✳" not in emb.clean_entry_text("dem ✳ lechenman ✳ gibt", vocab)
+    assert "✳" not in corpus_module.clean_entry_text("dem ✳ lechenman ✳ gibt", vocab)
 
 
 def test_a_trailing_raw_form_with_no_expansion_is_dropped():
-    assert emb.clean_entry_text("der hof d₎", _vocab("der hof")) == "der hof"
+    assert corpus_module.clean_entry_text("der hof d₎", _vocab("der hof")) == "der hof"
 
 
 def test_cleaning_empty_text_is_safe():
-    assert emb.clean_entry_text("", {}) == ""
-    assert emb.clean_entry_text(None, {}) == ""
+    assert corpus_module.clean_entry_text("", {}) == ""
+    assert corpus_module.clean_entry_text(None, {}) == ""
 
 
 def test_vocabulary_separates_fragments_from_words():

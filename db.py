@@ -263,7 +263,7 @@ def search_spans(query, cls, limit=50):
 # passages — so results are exact and there is no index to tune.
 #
 # Passages hold the *expanded* reading of the transcription, not the raw one:
-# see embeddings.clean_entry_text.
+# see corpus.clean_entry_text.
 
 _VECTOR_CACHE = {}
 

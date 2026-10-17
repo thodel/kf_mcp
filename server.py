@@ -2,6 +2,7 @@
 import argparse, json, logging, os
 from mcp.server.mcpserver import MCPServer
 import db as db_module
+import corpus
 import embeddings as emb_module
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -115,7 +116,7 @@ def search_semantic(query: str, limit: int = 10,
     Optionally restrict to a period with year_from / year_to.
     """
     try:
-        vector = emb_module.embed_query(query)
+        vector = corpus.embed_query(query)
     except emb_module.EmbeddingError as exc:
         return [{"error": str(exc)}]
     try:

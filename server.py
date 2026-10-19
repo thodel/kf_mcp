@@ -72,12 +72,22 @@ def get_entry(entry_id: str) -> dict:
 
 @mcp.tool()
 def search_persons(query: str, limit: int = 50) -> list[dict]:
-    """Search the person authority file by name. Returns HLS id, occupation, life dates."""
+    """Search the person authority file by name. Returns occupation and life dates.
+
+    `hls_id` is in every row and always null: the TEI person register carries
+    no HLS idno (0 of 5,260 persons in the 30.09.2026 build). It is kept so the
+    person and place rows have the same shape — do not search persons by it.
+    """
     return db_module.search_persons(query, limit)
 
 @mcp.tool()
 def get_person(pid: str) -> dict:
-    """Person authority record with HLS id, occupation, birth/death, and all entry mentions."""
+    """Person authority record: occupation, birth/death, and all entry mentions.
+
+    `hls_id` is always null for persons — the TEI person register carries no
+    HLS idno (0 of 5,260 in the 30.09.2026 build); the field stays for shape
+    symmetry with places. Places are the records that carry authority ids.
+    """
     result = db_module.get_person(pid)
     if not result:
         return {"error": f"Person '{pid}' not found.", "not_found": True}
@@ -85,12 +95,16 @@ def get_person(pid: str) -> dict:
 
 @mcp.tool()
 def search_places(query: str, limit: int = 50) -> list[dict]:
-    """Search the place authority file by name. Returns HLS id, geo coordinates, type."""
+    """Search the place authority file by name. Returns type, and `hls_id` where
+    the register has one (237 of 1,333 places in the 30.09.2026 build); the
+    full record from get_place adds geo and gnd_id."""
     return db_module.search_places(query, limit)
 
 @mcp.tool()
 def get_place(pid: str) -> dict:
-    """Place authority record with geo, HLS id, GND id, and all entry mentions."""
+    """Place authority record with all entry mentions, plus `hls_id`, `gnd_id`
+    and `geo` where the register has them (30.09.2026 build: 237 of 1,333
+    places carry an HLS id, 170 a GND id, 384 coordinates); otherwise null."""
     result = db_module.get_place(pid)
     if not result:
         return {"error": f"Place '{pid}' not found.", "not_found": True}
@@ -166,7 +180,8 @@ def resource_stats() -> str:
 
 @mcp.resource("kf://persons")
 def resource_persons() -> str:
-    """Brief person index: id, name, occupation, HLS id. Flags its own truncation."""
+    """Brief person index: id, name, occupation. Flags its own truncation.
+    hls_id is in every row and always null (see get_person)."""
     return json.dumps(db_module.person_index(), indent=2, ensure_ascii=False)
 
 @mcp.resource("kf://entry/{entry_id}")

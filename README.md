@@ -34,8 +34,11 @@ HTTP has one endpoint and no such handshake. **Existing clients pointed at `/sse
 be repointed at the new endpoint;** it is a deliberate cutover, not a compatible change.
 
 Entity identifiers come from the TEI `xml:id` attributes — persons `perXXXXXX`, places
-`locXXXXXX`, organisations `orgXXXX`. Person and place records additionally carry HLS
-identifiers (and GND, for places) where the edition supplies them.
+`locXXXXXX`, organisations `orgXXXX`. Place records additionally carry an HLS id, a GND
+id and coordinates where the edition supplies them (30.09.2026 build: 237 of 1,333
+places have an HLS id, 170 a GND id, 384 coordinates). Person records have an `hls_id`
+column too, but it is always null: the TEI person register carries no `idno[@type="HLS"]`
+(0 of 5,260 persons), so the column exists for shape symmetry only.
 
 ## Setup
 
@@ -210,9 +213,9 @@ passing `POST` to the app (a static `location` or a `limit_except` is shadowing 
 | `list_entries(limit=50, offset=0)` | Paginated list of register entries, ordered by year |
 | `get_entry(entry_id)` | Full entry: title, year, source, pages, transcription, all spans |
 | `search_persons(query, limit=50)` | Person authority file by name (substring match) |
-| `get_person(pid)` | Person record with HLS id, occupation, life dates, and mentions |
+| `get_person(pid)` | Person record with occupation, life dates, and mentions (`hls_id` always null) |
 | `search_places(query, limit=50)` | Place authority file by name (German or French) |
-| `get_place(pid)` | Place record with geo, HLS id, GND id, and mentions |
+| `get_place(pid)` | Place record with mentions, and geo, HLS id, GND id where present |
 | `search_orgs(query, limit=50)` | Organisation authority file by name or description |
 | `search_fulltext(query, limit=20)` | Full-text search over transcriptions, with snippets |
 | `get_entries_for_person(pid, limit=50)` | Entries mentioning a person, by authority id |

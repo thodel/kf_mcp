@@ -865,3 +865,59 @@ def test_semantic_stats_report_coverage(tmp_path):
     stats = _db.semantic_stats()
     assert stats["indexed"] and stats["coverage"] == 1.0
     assert stats["n_entries_indexed"] == 3
+
+
+# ── The tool descriptions promise only what the database holds (#8) ──────────
+#
+# Measured on 14.10.2026 against kf.db (build of 30.09.2026): 0 of 5,260 persons
+# have an hls_id, 237 of 1,333 places do (gnd_id 170, geo 384). The descriptions
+# said «Returns HLS id» for persons, and a client got null for every one of them
+# without a way to tell «missing» from «never there».
+
+def _tool_docs():
+    pytest.importorskip("mcp", reason="mcp SDK not installed")
+    import anyio
+    import server as server_module
+    # The description keeps the docstring's line breaks; compare on single spaces.
+    return {t.name: " ".join((t.description or "").split())
+            for t in anyio.run(server_module.mcp.list_tools)}
+
+
+def test_person_tools_do_not_promise_an_hls_id():
+    docs = _tool_docs()
+    for tool in ("search_persons", "get_person"):
+        doc = docs[tool]
+        assert "always null" in doc, f"{tool} must say hls_id is always null: {doc!r}"
+        assert "0 of 5,260" in doc, f"{tool} must carry the measured count: {doc!r}"
+        first_sentence = doc.split(". ")[0]
+        assert "HLS id" not in first_sentence, f"{tool} still promises an HLS id: {first_sentence!r}"
+
+
+def test_place_tools_say_the_ids_are_partial():
+    docs = _tool_docs()
+    for tool in ("search_places", "get_place"):
+        assert "where the register has" in docs[tool], docs[tool]
+        assert "237 of 1,333" in docs[tool], docs[tool]
+    assert "gnd_id" in docs["get_place"] and "geo" in docs["get_place"]
+
+
+def test_the_null_hls_id_still_ships_so_the_row_shape_is_stable():
+    """The column stays (shape symmetry with places); the description is what changed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db = _fixture_db_for_shape(tmp)
+        rows = db.search_persons("Habsburg")
+        assert rows and all("hls_id" in r and r["hls_id"] is None for r in rows), rows
+
+
+def _fixture_db_for_shape(tmp):
+    import db as db_module
+    from build_db import DDL, TRIGGERS
+    path = f"{tmp}/kf.db"
+    con = sqlite3.connect(path)
+    con.executescript(DDL); con.executescript(TRIGGERS)
+    con.execute(
+        "INSERT INTO persons (id, forename, surname, full_name, main_name) VALUES (?,?,?,?,?)",
+        ("per000001", "Agnes", "Habsburg", "Agnes von Habsburg", "Agnes von Habsburg"))
+    con.commit(); con.close()
+    db_module.set_db_path(path)
+    return db_module

@@ -783,16 +783,31 @@ def test_vocabulary_separates_fragments_from_words():
 
 
 # ── Vector search ────────────────────────────────────────────────────────────
+#
+# The matrix and the search are vectorstore.py (shared, byte-identical across
+# the fleet since #11); what is tested here is this repo's part: the join, the
+# hit, the year filter, the per-parent cap — and the head that comes off the
+# snippet.
+
+import vectorstore
+import embed_db
+import migrate_parent_id
+
 
 def _semantic_db(tmp_path):
-    """A corpus with hand-placed vectors, so expected ranking is arithmetic."""
+    """A corpus with hand-placed vectors, so expected ranking is arithmetic.
+
+    U-1 and U-2 carry the head line every passage gets from embed_db.py; U-3
+    does not (an index built before the head existed), and its second passage
+    begins with U-2's head — the one case the snippet cut must leave alone.
+    """
     path = str(tmp_path / "kf_sem.db")
     con = sqlite3.connect(path)
     con.executescript("""
         CREATE TABLE entries(id TEXT PRIMARY KEY, title TEXT, short_id TEXT,
                              year INTEGER, source TEXT, pages TEXT, text_raw TEXT);
     """)
-    con.executescript(_db.EMBEDDING_SCHEMA_SQL)
+    con.executescript(vectorstore.SCHEMA_SQL)
     rows = [("U-1", "Urkunde 1", 1360, [1.0, 0.0, 0.0]),
             ("U-2", "Urkunde 2", 1450, [0.8, 0.6, 0.0]),
             ("U-3", "Urkunde 3", 1644, [0.0, 1.0, 0.0])]
@@ -801,12 +816,18 @@ def _semantic_db(tmp_path):
                     "VALUES (?,?,?,?,?,?)", (eid, title, eid, year, "ed.", "text"))
         for index in (0, 1):
             cid = f"{eid}#{index}"
+            body = f"{title} Passage {index}"
+            if eid != "U-3":
+                text = f"{corpus_module.head_line(title, year)}\n{body}"
+            elif index == 1:
+                text = f"{corpus_module.head_line('Urkunde 2', 1450)}\n{body}"
+            else:
+                text = body
             con.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?)",
-                        (cid, eid, index, 0, 10, f"{title} Passage {index}"))
+                        (cid, eid, index, 0, 10, text))
             con.execute("INSERT INTO embeddings VALUES (?,?,?,?)",
                         (cid, "test-model", 3, emb.pack(vec)))
     con.commit(); con.close()
-    _db._VECTOR_CACHE.clear()
     _db.set_db_path(path)
     return path
 
@@ -814,7 +835,7 @@ def _semantic_db(tmp_path):
 def test_passages_rank_by_cosine_similarity(tmp_path):
     _semantic_db(tmp_path)
     hits = _db.search_semantic([1.0, 0.0, 0.0], limit=3, model="test-model",
-                               per_entry=1)
+                               per_parent=1)
     assert [h["id"] for h in hits] == ["U-1", "U-2", "U-3"]
     assert hits[0]["score"] > hits[1]["score"]
 
@@ -822,7 +843,7 @@ def test_passages_rank_by_cosine_similarity(tmp_path):
 def test_one_charter_cannot_fill_the_result_set(tmp_path):
     _semantic_db(tmp_path)
     hits = _db.search_semantic([1.0, 0.0, 0.0], limit=6, model="test-model",
-                               per_entry=1)
+                               per_parent=1)
     assert len({h["id"] for h in hits}) == len(hits)
 
 
@@ -839,6 +860,38 @@ def test_hits_carry_what_a_citation_needs(tmp_path):
     hit = _db.search_semantic([1.0, 0.0, 0.0], limit=1, model="test-model")[0]
     for field in ("id", "chunk_id", "short_id", "year", "char_start", "score"):
         assert field in hit, field
+
+
+def test_the_snippet_starts_with_the_text_not_the_head(tmp_path):
+    # Fleet rule (ch-h-bot#555): the head `title year` is for the vector; the
+    # hit carries title and year as fields, so the snippet is the passage
+    # without its first line. Offsets never counted the head and stay.
+    _semantic_db(tmp_path)
+    hits = {h["chunk_id"]: h for h in _db.search_semantic(
+        [1.0, 0.0, 0.0], limit=6, model="test-model", per_parent=2)}
+    assert hits["U-1#0"]["snippet"] == "Urkunde 1 Passage 0"
+    assert hits["U-2#1"]["snippet"] == "Urkunde 2 Passage 1"
+    assert (hits["U-1#0"]["char_start"], hits["U-1#0"]["char_end"]) == (0, 10)
+
+
+def test_only_this_entrys_own_head_is_cut(tmp_path):
+    # A passage without a head (older index) is untouched, and so is one that
+    # happens to begin with another entry's head: the cut uses the head of the
+    # entry the chunk belongs to, built by the function that writes it.
+    _semantic_db(tmp_path)
+    hits = {h["chunk_id"]: h for h in _db.search_semantic(
+        [0.0, 1.0, 0.0], limit=6, model="test-model", per_parent=2)}
+    assert hits["U-3#0"]["snippet"] == "Urkunde 3 Passage 0"
+    assert hits["U-3#1"]["snippet"] == "Urkunde 2 1450\nUrkunde 3 Passage 1"
+
+
+def test_passage_body_cuts_exactly_the_head_line():
+    head = corpus_module.head_line(" Hof ze Lind ", 1644)
+    assert head == " Hof ze Lind  1644"                      # verbatim, no strip
+    assert _db.passage_body(head + "\nDer hof", " Hof ze Lind ", 1644) == "Der hof"
+    assert _db.passage_body(head + " Der hof", " Hof ze Lind ", 1644) == head + " Der hof"
+    assert _db.passage_body("Der hof", " Hof ze Lind ", 1644) == "Der hof"
+    assert _db.passage_body("\nDer hof", None, None) == "\nDer hof"   # no head, no cut
 
 
 def test_a_dimension_mismatch_is_reported_not_silently_wrong(tmp_path):
@@ -861,10 +914,311 @@ def test_warm_reports_size_rather_than_raising(tmp_path):
 
 
 def test_semantic_stats_report_coverage(tmp_path):
+    # The keys are the shared ones since #11: n_indexed / n_total, not
+    # n_entries_indexed / n_entries_total. Nothing in the bot read the old
+    # ones (ch-h-bot#555).
     _semantic_db(tmp_path)
     stats = _db.semantic_stats()
     assert stats["indexed"] and stats["coverage"] == 1.0
-    assert stats["n_entries_indexed"] == 3
+    assert stats["n_indexed"] == 3 and stats["n_total"] == 3
+    assert stats["n_chunks"] == 6
+    assert "n_entries_indexed" not in stats and "n_entries_total" not in stats
+
+
+# ── The head and the reading are what the old embed_db.py produced ───────────
+#
+# Frozen on 22.10.2026 by running the embed_db.py of commit 71d2519 (the last
+# with its own chunker) on this fixture; the shared embed_db.py with
+# corpus.iter_documents/clean must write the same rows, or the 6,621 vectors
+# in kf.db no longer belong to their passages. The fixture's vocabulary is
+# six entries, so a token that is only ever followed by a raw form here
+# ("druͥzehenhundert") counts as a fragment — that is the rule, applied to
+# a small corpus, and the old code did the same.
+
+_FREEZE_ENTRIES = [
+    # (id, title, year, text_raw)
+    ("AA_0001", "Urkunde 1350", 1350,
+     "Diz ist dˀ der brief ✳ den Hein r₎ rich von Brugg ✳ un̄ und sin wip ✳ gaben ✳ "
+     "der stif tˀin terin ze Kuͥngsvelden ✳ , dez jares ✳ do man zalt ✳ "
+     "von gottes gebuͥrt ✳ druͥzehenhundert ✳ un̄ und fuͥnfzig jar ✳ . "
+     "Hein r₎ rich ✳ hat gesworn ✳ ."),
+    ("AA_0002", " Hof ze Lind ", 1644,                       # whitespace at the rim
+     ("Der hof ze Lind ✳ gibt jaͤrlich ✳ zwen mütt kernen ✳ , un̄ und ein malter haber ✳ . " * 40)
+     + "Hein r₎ rich ist der lechenman ✳ ."),
+    ("AA_0003", None, 1401,                                  # no title
+     "Ein brief ✳ ane titel ✳ von Brugg ✳ , un̄ und ane jar ✳ . Ze Brugg ✳ geben ✳ ."),
+    ("AA_0004", "Ohne Jahr", None, "Diz ✳ hat kein jar ✳ un̄ und einen titel ✳ ."),
+    ("AA_0005", "Leer", 1500, ""),                           # never chunked
+    ("AA_0006", "Null", 1501, None),
+]
+
+# (chunk_id, parent_id, chunk_index, char_start, char_end, text) as the old
+# embed_db.py wrote them. The four long passages of AA_0002 are frozen by
+# offsets, length and the sha256 of their text.
+_FROZEN_ROWS = [
+    ('AA_0001#0', 'AA_0001', 0, 0, 186,
+     'Urkunde 1350 1350\nDiz ist der brief den Heinrich von Brugg und sin wip gaben der '
+     'stifterin ze Kuͥngsvelden, dez jares do man zalt von gottes gebuͥrt '
+     'druͥzehenhundertund fuͥnfzig jar. Heinrich hat gesworn.'),
+    ('AA_0003#0', 'AA_0003', 0, 0, 59,
+     '1401\nEin brief ane titel von Brugg, und ane jar. Ze Brugg geben.'),
+    ('AA_0004#0', 'AA_0004', 0, 0, 33,
+     'Ohne Jahr\nDiz hat kein jar und einen titel.'),
+]
+_FROZEN_LONG = {   # chunk_id: (char_start, char_end, len(text), sha256(text)[:16])
+    'AA_0002#0': (0, 980, 998, '77dd1f844cbe2ea7'),
+    'AA_0002#1': (830, 1820, 1008, 'a96756a1a85a18e1'),
+    'AA_0002#2': (1670, 2660, 1008, 'a96756a1a85a18e1'),
+    'AA_0002#3': (2510, 2827, 336, '829ca9a573016c28'),
+}
+_FROZEN_LONG_HEAD = ' Hof ze Lind  1644'       # leading space, two spaces, no strip
+_FROZEN_CLEAN = {
+    'AA_0001': 'Diz ist der brief den Heinrich von Brugg und sin wip gaben der stifterin '
+               'ze Kuͥngsvelden, dez jares do man zalt von gottes gebuͥrt '
+               'druͥzehenhundertund fuͥnfzig jar. Heinrich hat gesworn.',
+    'AA_0003': 'Ein brief ane titel von Brugg, und ane jar. Ze Brugg geben.',
+    'AA_0004': 'Diz hat kein jar und einen titel.',
+    'AA_0005': '',
+    'AA_0006': '',
+}
+_FROZEN_CLEAN_LONG = ('AA_0002', 2827, 'da5f29d75b730138',
+                      'Der hof ze Lind gibt jaͤrlich zwen mütt kernen, und ein malt',
+                      'alter haber. Heinrich ist der lechenman.')
+
+
+def _sha(text):
+    import hashlib
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _freeze_db(entries=_FREEZE_ENTRIES):
+    con = sqlite3.connect(":memory:")
+    con.executescript("""
+        CREATE TABLE entries(id TEXT PRIMARY KEY, title TEXT, short_id TEXT,
+                             year INTEGER, source TEXT, pages TEXT, text_raw TEXT);
+    """)
+    con.executescript(vectorstore.SCHEMA_SQL)
+    for eid, title, year, text in entries:
+        con.execute("INSERT INTO entries(id,title,short_id,year,source,text_raw) "
+                    "VALUES (?,?,?,?,?,?)", (eid, title, eid, year, "ed.", text))
+    con.commit()
+    return con
+
+
+def test_the_shared_chunker_writes_the_rows_the_old_one_wrote():
+    con = _freeze_db()
+    assert embed_db.build_chunks(con, None, 1000, 150, True) == 7
+    rows = {r[0]: tuple(r) for r in con.execute(
+        "SELECT chunk_id, parent_id, chunk_index, char_start, char_end, text FROM chunks")}
+    assert len(rows) == 7
+    for frozen in _FROZEN_ROWS:
+        assert rows[frozen[0]] == frozen, frozen[0]
+    for cid, (start, end, length, sha) in _FROZEN_LONG.items():
+        _, parent, _, s, e, text = rows[cid]
+        assert parent == "AA_0002"
+        assert (s, e, len(text), _sha(text)) == (start, end, length, sha), cid
+        assert text.startswith(_FROZEN_LONG_HEAD + "\n"), cid
+
+
+def test_the_head_is_verbatim_title_and_year():
+    assert corpus_module.head_line("Urkunde 1350", 1350) == "Urkunde 1350 1350"
+    assert corpus_module.head_line(" Hof ze Lind ", 1644) == _FROZEN_LONG_HEAD
+    assert corpus_module.head_line(None, 1401) == "1401"
+    assert corpus_module.head_line("Ohne Jahr", None) == "Ohne Jahr"
+    assert corpus_module.head_line(None, None) == ""
+
+
+def test_clean_is_the_old_reading_with_the_corpus_vocabulary():
+    con = _freeze_db()
+    # iter_documents builds the vocabulary over the whole table before its
+    # first yield; clean() reads it.
+    next(corpus_module.iter_documents(con))
+    for eid, _, _, text in _FREEZE_ENTRIES:
+        if eid in _FROZEN_CLEAN:
+            assert corpus_module.clean(text) == _FROZEN_CLEAN[eid], eid
+    eid, length, sha, head, tail = _FROZEN_CLEAN_LONG
+    cleaned = corpus_module.clean(dict((e[0], e[3]) for e in _FREEZE_ENTRIES)[eid])
+    assert (len(cleaned), _sha(cleaned)) == (length, sha)
+    assert cleaned.startswith(head) and cleaned.endswith(tail)
+
+
+def test_the_vocabulary_covers_the_whole_table_whatever_the_limit():
+    # "Hein r₎ rich" in AA_0001 joins to "Heinrich" because "hein" is a
+    # fragment everywhere in the corpus. With the vocabulary built over the
+    # limited batch only it would still join here — so the counter-case is
+    # a token whose evidence lies outside the batch: "ist" in AA_0001 is
+    # followed by a raw form (dˀ) there and only there; with a whole-table
+    # vocabulary it is a word (AA_0002 says so 40 times) and is not glued.
+    con = _freeze_db()
+    assert embed_db.build_chunks(con, 1, 1000, 150, True) == 1
+    (text,) = con.execute("SELECT text FROM chunks WHERE chunk_id='AA_0001#0'").fetchone()
+    assert text == _FROZEN_ROWS[0][5]
+    assert "Diz ist der brief" in text and "istder" not in text
+
+
+def test_iter_documents_skips_entries_that_have_chunks_and_empty_ones():
+    con = _freeze_db()
+    embed_db.build_chunks(con, None, 1000, 150, True)
+    assert list(corpus_module.iter_documents(con)) == []
+    con.execute("DELETE FROM chunks WHERE parent_id='AA_0003'")
+    assert [d[0] for d in corpus_module.iter_documents(con)] == ["AA_0003"]
+
+
+# ── The migration from the old index (chunks.entry_id) to the shared schema ──
+#
+# What kf.db looked like before #11, frozen from the old db.py: the parent
+# column is entry_id, the runs table counts n_articles, the index is
+# ix_chunks_entry. migrate_parent_id.py renames them in one transaction and
+# nothing else; afterwards the shared embed_db.py finds every chunk with its
+# vector and has nothing to do.
+
+_OLD_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS chunks (
+    chunk_id    TEXT    PRIMARY KEY,
+    entry_id    TEXT    NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    char_start  INTEGER NOT NULL,
+    char_end    INTEGER NOT NULL,
+    text        TEXT    NOT NULL,
+    UNIQUE (entry_id, chunk_index)
+);
+CREATE TABLE IF NOT EXISTS embeddings (
+    chunk_id TEXT    PRIMARY KEY REFERENCES chunks(chunk_id) ON DELETE CASCADE,
+    model    TEXT    NOT NULL,
+    dims     INTEGER NOT NULL,
+    vector   BLOB    NOT NULL
+);
+CREATE TABLE IF NOT EXISTS embedding_runs (
+    run_id      TEXT PRIMARY KEY,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,
+    model       TEXT NOT NULL,
+    dims        INTEGER,
+    base_url    TEXT,
+    chunk_chars INTEGER,
+    chunk_overlap INTEGER,
+    n_articles  INTEGER,
+    n_chunks    INTEGER,
+    notes       TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_chunks_entry ON chunks(entry_id);
+CREATE INDEX IF NOT EXISTS ix_embeddings_model ON embeddings(model);
+"""
+
+
+def _old_index_db(tmp_path, name="kf_old.db"):
+    """kf.db as the old embed_db.py left it: a head on every passage, one
+    vector per chunk, a finished run with n_articles."""
+    path = str(tmp_path / name)
+    con = sqlite3.connect(path)
+    con.executescript("""
+        CREATE TABLE entries(id TEXT PRIMARY KEY, title TEXT, short_id TEXT,
+                             year INTEGER, source TEXT, pages TEXT, text_raw TEXT);
+    """)
+    con.executescript(_OLD_SCHEMA_SQL)
+    rows = [("U-1", "Urkunde 1", 1360, [1.0, 0.0, 0.0]),
+            ("U-2", "Urkunde 2", 1450, [0.8, 0.6, 0.0]),
+            ("U-3", "Urkunde 3", 1644, [0.0, 1.0, 0.0])]
+    for eid, title, year, vec in rows:
+        con.execute("INSERT INTO entries(id,title,short_id,year,source,text_raw) "
+                    "VALUES (?,?,?,?,?,?)", (eid, title, eid, year, "ed.", "text"))
+        for index in (0, 1):
+            cid = f"{eid}#{index}"
+            con.execute("INSERT INTO chunks VALUES (?,?,?,?,?,?)",
+                        (cid, eid, index, 0, 10,
+                         f"{corpus_module.head_line(title, year)}\n{title} Passage {index}"))
+            con.execute("INSERT INTO embeddings VALUES (?,?,?,?)",
+                        (cid, "test-model", 3, emb.pack(vec)))
+    con.execute("INSERT INTO embedding_runs (run_id, started_at, finished_at, model, dims, "
+                "n_articles, n_chunks) VALUES ('r1','2026-01-01T00:00:00Z',"
+                "'2026-01-01T00:01:00Z','test-model',3,3,6)")
+    con.commit(); con.close()
+    return path
+
+
+def _schema(path):
+    con = sqlite3.connect(path)
+    try:
+        return {
+            "chunks": [r[1] for r in con.execute("PRAGMA table_info(chunks)")],
+            "runs": [r[1] for r in con.execute("PRAGMA table_info(embedding_runs)")],
+            "indexes": sorted(r[1] for r in con.execute("PRAGMA index_list(chunks)")
+                              if not r[1].startswith("sqlite_autoindex")),
+        }
+    finally:
+        con.close()
+
+
+def test_migration_renames_and_keeps_every_row(tmp_path):
+    path = _old_index_db(tmp_path)
+    assert _schema(path)["chunks"][1] == "entry_id"
+    result = migrate_parent_id.migrate(path, quiet=True)
+    assert result["integrity"] == "ok"
+    assert result["before"] == result["after"] == {
+        "chunks": 6, "embeddings": 6, "parents": 3, "runs": 1}
+    schema = _schema(path)
+    assert schema["chunks"][1] == "parent_id" and "entry_id" not in schema["chunks"]
+    assert "n_parents" in schema["runs"] and "n_articles" not in schema["runs"]
+    assert schema["indexes"] == ["ix_chunks_parent"]
+    con = sqlite3.connect(path)
+    assert con.execute("SELECT n_parents FROM embedding_runs").fetchone() == (3,)
+    # The shared schema on top creates nothing twice (the reason for DROP INDEX).
+    con.executescript(vectorstore.SCHEMA_SQL); con.commit(); con.close()
+    assert _schema(path)["indexes"] == ["ix_chunks_parent"]
+
+
+def test_after_migration_the_shared_embed_db_has_nothing_to_do(tmp_path, capsys):
+    path = _old_index_db(tmp_path)
+    migrate_parent_id.migrate(path, quiet=True)
+    con = sqlite3.connect(path)
+    con.executescript(vectorstore.SCHEMA_SQL)
+    assert embed_db.build_chunks(con, None, 1000, 150, True) == 0
+    assert embed_db.embed_pending(con, "test-model", 100, True) == (0, 0)
+    con.close()
+    assert embed_db.main(["--db", path, "--status"]) == 0
+    out = capsys.readouterr().out
+    assert "n_chunks: 6" in out and "n_indexed: 3" in out and "n_total: 3" in out
+    # and the search goes through vectorstore on the renamed column
+    _db.set_db_path(path)
+    hits = _db.search_semantic([1.0, 0.0, 0.0], limit=3, model="test-model", per_parent=1)
+    assert [h["id"] for h in hits] == ["U-1", "U-2", "U-3"]
+    assert hits[0]["snippet"] == "Urkunde 1 Passage 0"
+    assert _db.semantic_stats()["n_indexed"] == 3
+
+
+def test_migration_refuses_a_migrated_or_foreign_database(tmp_path, capsys):
+    import hashlib
+    path = _old_index_db(tmp_path)
+    assert migrate_parent_id.main(["--db", path]) == 0
+    digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
+    # a second run says so and changes nothing
+    assert migrate_parent_id.main(["--db", path]) == 1
+    assert "already migrated" in capsys.readouterr().err
+    assert hashlib.sha256(open(path, "rb").read()).hexdigest() == digest
+    # a database built on the shared schema from the start
+    fresh = str(tmp_path / "fresh.db")
+    con = sqlite3.connect(fresh); con.executescript(vectorstore.SCHEMA_SQL); con.close()
+    assert migrate_parent_id.main(["--db", fresh]) == 1
+    assert "already migrated" in capsys.readouterr().err
+    # a corpus without an index, and a missing file
+    bare = str(tmp_path / "bare.db")
+    con = sqlite3.connect(bare); con.execute("CREATE TABLE entries(id TEXT)"); con.close()
+    assert migrate_parent_id.main(["--db", bare]) == 1
+    assert "nothing to migrate" in capsys.readouterr().err
+    assert migrate_parent_id.main(["--db", str(tmp_path / "none.db")]) == 1
+
+
+def test_migration_refuses_a_half_renamed_database(tmp_path, capsys):
+    # The old column renamed but the old index still there: neither schema.
+    path = _old_index_db(tmp_path)
+    con = sqlite3.connect(path)
+    con.execute("ALTER TABLE chunks RENAME COLUMN entry_id TO parent_id"); con.commit(); con.close()
+    before = _schema(path)
+    assert migrate_parent_id.main(["--db", path]) == 1
+    err = capsys.readouterr().err
+    assert "refusing" in err and "no column entry_id" in err and "already has parent_id" in err
+    assert "n_articles" not in err and "ix_chunks" not in err      # those two are still fine
+    assert _schema(path) == before
 
 
 # ── The tool descriptions promise only what the database holds (#8) ──────────

@@ -274,6 +274,7 @@ date have `year = NULL`.
 | `places` | id, name_de, name_fr, country, region, geo, hls_id, gnd_id, place_type |
 | `orgs` | id, name, desc_de, desc_fr |
 | `fts_entries`, `fts_spans` | FTS5 indexes (external content, populated by AFTER INSERT triggers at build time — there are no update/delete triggers, which is why a rebuild clears and repopulates) |
+| `chunks`, `embeddings`, `embedding_runs` | the semantic index (`vectorstore.SCHEMA_SQL`, shared): passages keyed `parent_id` = entries.id, one vector per passage, one row per `embed_db.py` run |
 
 ## Deployment
 
@@ -357,17 +358,45 @@ remains findable.
 GPUSTACK_API_KEY=... python embed_db.py             # whole corpus
 GPUSTACK_API_KEY=... python embed_db.py --limit 100 # trial run on a sample
 GPUSTACK_API_KEY=... python embed_db.py --recompute # after changing the model
+python embed_db.py --status                         # coverage, nothing embedded
 ```
 
-Entries are windowed into ~1000-character passages (150 overlap), each prefixed with
-its title and year — a charter passage otherwise carries no trace of which document
-or century it belongs to, and "the farm at Lind" reads the same in 1360 as in 1644.
+`embed_db.py`, `vectorstore.py` and `embeddings.py` are the fleet's shared files,
+vendored byte-identical from [eperiodica_mcp](https://github.com/thodel/eperiodica_mcp)
+(ch-h-bot `scripts/check_vendored_drift.py` checks the checksums). Everything that
+is Königsfelden's lives in `corpus.py`: the expanded reading (`clean`), the head line
+on every passage (`head_line`), and `iter_documents`, which builds the expansion
+vocabulary over the whole corpus before the first entry is yielded.
+
+Entries are windowed into ~1000-character passages (150 overlap), each with its
+title and year on the first line — a charter passage otherwise carries no trace of
+which document or century it belongs to, and "the farm at Lind" reads the same in
+1360 as in 1644. The head is for the vector: a `search_semantic` hit carries title
+and year as fields and its `snippet` is the passage without that line.
 Embedding uses `qwen3-embedding-0.6b` on GPUStack (1024 dimensions); vectors are
 stored L2-normalised as float32 BLOBs, so search is one exact matrix multiply.
 
 Runs are resumable — chunks already embedded with the same model are skipped, each
 batch is committed — and recorded in `embedding_runs` with model, dimensions and
 window settings.
+
+### An index built before #11
+
+Until thodel/kf_mcp#11 this repo had its own `embed_db.py`, and its index names the
+parent column `chunks.entry_id` and the run counter `embedding_runs.n_articles`; the
+shared files say `parent_id` and `n_parents`. The passages themselves are the same
+(all 6,621 measured row-identical, ch-h-bot#555), so the move is a rename, not a
+re-embed. With the server stopped and a backup made:
+
+```bash
+cp kf.db kf.db.pre-parent-id
+python migrate_parent_id.py --db kf.db       # one transaction, then integrity_check
+python embed_db.py --db kf.db --status       # n_chunks unchanged, nothing pending
+```
+
+The script refuses a database that is already migrated. Code and rename have to be
+deployed together: the old `db.py` asks for `entry_id` and answers every
+`search_semantic` on a renamed database with «no such column».
 
 ### Query-time requirements
 

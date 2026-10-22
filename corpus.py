@@ -6,11 +6,14 @@ embeddings.py is vendored byte-identical across the fleet (see ch-h-bot
 docs/MCP_PROVIDER_PATTERN.md); whatever is particular to this corpus lives
 here instead, so that the shared file can stay a checksum.
 
-This repo is on the older layout: embed_db.py and the semantic search in db.py
-are its own, not the shared ones. Its index stores `chunks.entry_id` (the
-shared schema says `parent_id`) and puts a heading (title, year) on the first
-line of every passage, which the shared embed_db.py cannot do. Moving to the shared files is
-a schema migration plus a full re-embed, so it is a deployment, not a sync.
+Since thodel/kf_mcp#11 embed_db.py and vectorstore.py are the shared files too
+(byte-identical with eperiodica_mcp). What they need from this corpus is the
+interface at the end of this file: DB_ENV / DEFAULT_DB / PARENT_TABLE,
+iter_documents(conn, limit) yielding (id, head, text), and clean(text). The
+index itself did not change in the move: `chunks.entry_id` became `parent_id`
+(migrate_parent_id.py), the head on every passage is built by the same rule as
+before, and all 6,621 passages were measured row-identical (ch-h-bot#555), so
+the vectors stayed.
 """
 
 from __future__ import annotations
@@ -128,6 +131,65 @@ def clean_entry_text(text: str, vocab: dict) -> str:
         out.append(token)
         i += 1
     return re.sub(r"\s+([,.;:])", r"\1", " ".join(out)).strip()
+
+
+# ── What the shared embed_db.py asks of a corpus ─────────────────────────────
+
+DB_ENV = "KF_DB"
+DEFAULT_DB = "/data/kf.db"
+PARENT_TABLE = "entries"
+
+# The expansion vocabulary of the whole corpus. iter_documents builds it before
+# its first yield, and clean() reads it: the shared build_chunks calls
+# iter_documents before the first clean, so the order is right. Before the
+# first iter_documents it is empty, and clean() then never joins a fragment.
+_VOCAB: dict = {}
+
+
+def head_line(title, year) -> str:
+    """The first line of every passage of an entry: `title year`.
+
+    Verbatim what the old embed_db.py wrote (no strip, no separator beyond the
+    one space, a missing title or year simply absent) — the stored passages
+    were embedded with exactly this line, and db.passage_body cuts exactly this
+    line off a hit's snippet. One function, so there is one rule.
+    """
+    return " ".join(str(x) for x in (title, year) if x)
+
+
+def clean(text: str) -> str:
+    """The expanded reading of one entry, with the vocabulary of the whole corpus."""
+    return clean_entry_text(text, _VOCAB)
+
+
+def iter_documents(conn, limit=None):
+    """Yield (entry_id, head, text_raw) for every entry that has no chunks yet.
+
+    The vocabulary comes first and comes from the WHOLE table, whatever
+    ``limit`` says: whether "Hein" is a fragment or a name needs every
+    occurrence of the token, not the ones in this batch. That is how the old
+    embed_db.py did it and how ch-h-bot#555 measured the move (6,621 of 6,621
+    passages row-identical).
+
+    Only entries without chunks are yielded, as before: a rerun on a fully
+    chunked database cleans nothing, and ``--limit`` means "this many
+    not-yet-chunked entries", a trial run on a sample.
+    """
+    global _VOCAB
+    _VOCAB = build_vocab(
+        t for (t,) in conn.execute(
+            f"SELECT text_raw FROM {PARENT_TABLE} WHERE text_raw IS NOT NULL"))
+    rows = conn.execute(
+        f"""
+        SELECT e.id, e.title, e.year, e.text_raw
+        FROM {PARENT_TABLE} e
+        WHERE e.text_raw IS NOT NULL AND e.text_raw <> ''
+          AND NOT EXISTS (SELECT 1 FROM chunks c WHERE c.parent_id = e.id)
+        ORDER BY e.id
+        """ + (" LIMIT ?" if limit else ""),
+        (limit,) if limit else ()).fetchall()
+    for entry_id, title, year, text in rows:
+        yield entry_id, head_line(title, year), text
 
 
 def embed_query(query: str, model: str = emb.DEFAULT_MODEL, client=None) -> list[float]:

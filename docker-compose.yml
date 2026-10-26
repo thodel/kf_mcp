@@ -24,7 +24,7 @@ services:
       # the UniBE network only.
       - GPUSTACK_BASE_URL=${GPUSTACK_BASE_URL:-https://gpustack.unibe.ch/v1}
       - GPUSTACK_API_KEY=${GPUSTACK_API_KEY:-}
-      - KF_EMBED_MODEL=${KF_EMBED_MODEL:-qwen3-embedding-0.6b}
+      - KF_EMBED_MODEL=${KF_EMBED_MODEL:-qwen3-embedding-4b}
     healthcheck:
       # A plain TCP connect: opening the endpoint would start an MCP session and
       # abandon it every 30 seconds.

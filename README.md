@@ -373,7 +373,8 @@ title and year on the first line — a charter passage otherwise carries no trac
 which document or century it belongs to, and "the farm at Lind" reads the same in
 1360 as in 1644. The head is for the vector: a `search_semantic` hit carries title
 and year as fields and its `snippet` is the passage without that line.
-Embedding uses `qwen3-embedding-0.6b` on GPUStack (1024 dimensions); vectors are
+Embedding uses `qwen3-embedding-4b` on GPUStack (2560 dimensions; 0.6b until
+24.10.2026, ch-h-bot#570); vectors are
 stored L2-normalised as float32 BLOBs, so search is one exact matrix multiply.
 
 Runs are resumable — chunks already embedded with the same model are skipped, each

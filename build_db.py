@@ -1,4 +1,4 @@
-import argparse, glob, re, sqlite3, sys, time, xml.etree.ElementTree as ET
+import argparse, glob, re, sqlite3, sys, time, unicodedata, xml.etree.ElementTree as ET
 
 NS = 'http://www.tei-c.org/ns/1.0'
 XMLID = '{http://www.w3.org/XML/1998/namespace}id'
@@ -64,13 +64,56 @@ def join_text(left, right):
     if _ENDS_TOKEN.search(left) and _STARTS_WORD.match(right): return left+' '+right
     return left+right
 
+def _is_word_char(ch):
+    return ch.isalnum() or unicodedata.combining(ch)
+
+def _word_tail(text):
+    """The run of word characters at the end of ``text``: ``('unn', '…un')`` → ``'unn'``."""
+    i=len(text)
+    while i and _is_word_char(text[i-1]): i-=1
+    return text[i:]
+
+def _word_head(text):
+    """The run of word characters at the start of ``text``."""
+    i=0
+    while i<len(text) and _is_word_char(text[i]): i+=1
+    return text[:i]
+
+def abbreviation_layers(choice):
+    """``(abbr, expan)`` of a ``<choice>`` that pairs an abbreviation with its expansion,
+    each collapsed to its own text; None for any other choice (orig/reg, sic/corr)."""
+    abbr=expan=None
+    for c in choice:
+        if not isinstance(c.tag, str): continue
+        local=c.tag.rsplit('}',1)[-1]
+        if local=='abbr': abbr=' '.join(extract_text(c).split())
+        elif local=='expan': expan=' '.join(extract_text(c).split())
+    return (abbr,expan) if abbr and expan else None
+
 def extract_text(elem):
     """Flatten an element to text. Adjacent markup with no whitespace between the tags
-    would otherwise glue words together and make them unsearchable."""
+    would otherwise glue words together and make them unsearchable.
+
+    An abbreviation inside a word — the edition writes ``unn<choice><abbr>sz₎</abbr>
+    <expan>szer</expan></choice>`` for *unnszer*, with the XML's own line breaks and
+    indentation between the tags — is rendered as two whole words, the raw one and
+    its reading: ``unnsz₎ unnszer``. Before, the indentation came through as spaces
+    and the word arrived in three pieces (``unn sz₎ szer``, ``hofmeis tˀ ter``): a
+    search for *hofmeister* missed it, and a quote of the reading could not be
+    checked against the text (agentic_historian#868). A whole-word abbreviation
+    (``un̄ und``) renders as before.
+    """
     out=elem.text or ''
     for c in elem:
         inner=extract_text(c); tail=c.tail or ''
-        if word_internal(c): out=out+inner+tail          # splice into the word
+        layers=abbreviation_layers(c) if word_internal(c) and c.tag.rsplit('}',1)[-1]=='choice' else None
+        if layers:
+            abbr,expan=layers
+            stem=_word_tail(out); out=out[:len(out)-len(stem)]
+            rest=_word_head(tail); tail=tail[len(rest):]
+            word=f"{stem}{abbr}{rest} {stem}{expan}{rest}"
+            out=join_text(join_text(out,word),tail)
+        elif word_internal(c): out=out+inner+tail          # splice into the word
         else: out=join_text(join_text(out,inner),tail)
     return out
 

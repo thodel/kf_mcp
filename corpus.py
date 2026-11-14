@@ -53,6 +53,11 @@ QUERY_PREFIX = os.environ.get(
 # Embedded as-is, this is close to unusable: names arrive split in half, every
 # abbreviated word is doubled, and 82k segment markers punctuate the text at
 # random. Embedding the expanded reading is the decision this implements.
+#
+# Since build_db renders an abbreviation inside a word as two whole words
+# ("Heinr₎ Heinrich", agentic_historian#868), a database built from today's
+# code has no split fragments left: the join below then never fires, and the
+# vocabulary only matters for a database built before that change.
 
 SEGMENT_MARKER = "✳"
 # Expansion bracket, abbreviation hook, combining macron — the three ways this

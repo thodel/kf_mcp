@@ -286,6 +286,58 @@ def test_adjacent_markup_does_not_glue_words():
     tr.assert_ok()
 
 
+def _flat(frag):
+    import xml.etree.ElementTree as ET
+    from build_db import norm_text
+    return norm_text(ET.fromstring(f'<div xmlns="http://www.tei-c.org/ns/1.0">{frag}</div>'))
+
+
+# The edition marks an abbreviation inside a word with <choice> right after the
+# stem, and the XML is indented: unn<choice>⏎<abbr>sz₎</abbr>⏎<expan>szer</expan>⏎</choice>.
+# The indentation came through as spaces, the word arrived as "unn sz₎ szer", and
+# "hofmeis tˀ ter" was unfindable for *hofmeister* (agentic_historian#868, 14.11.2026).
+
+def test_an_abbreviation_inside_a_word_renders_as_two_whole_words():
+    tr = Checks()
+    tr.check(_flat('unn<choice>\n    <abbr>sz₎</abbr>\n    <expan>szer</expan>\n</choice> hofmeister')
+             == "unnsz₎ unnszer hofmeister", "stem + abbreviation, stem + expansion; indentation gone")
+    tr.check(_flat('<lb n="N001"/>Unn<choice><abbr>sz₎</abbr><expan>szer</expan></choice> andaͣchtig')
+             == "Unnsz₎ Unnszer andaͣchtig", "the stem after a line break is the word's")
+    tr.check(_flat('hofmeis<choice><abbr>tˀ</abbr><expan>ter</expan></choice>rich')
+             == "hofmeistˀrich hofmeisterrich", "text after the choice belongs to both layers")
+    tr.check(_flat('Oͤs<choice><abbr>tˀ</abbr><expan>ter</expan></choice>')
+             == "Oͤstˀ Oͤster", "a combining mark in the stem is part of the word")
+    tr.assert_ok()
+
+
+def test_a_whole_word_abbreviation_and_the_other_choices_render_as_before():
+    tr = Checks()
+    tr.check(_flat('dàrinn <choice>\n <abbr>im̄</abbr>\n <expan>imm</expan>\n</choice> bevolhen')
+             == "dàrinn im̄ imm bevolhen", "a whole-word abbreviation: raw form, expansion")
+    tr.check(_flat('<choice><orig>vnd</orig><reg>und</reg></choice> so') == "vndund so",
+             "a choice without abbr/expan is spliced as any word-internal element")
+    tr.check(_flat('Klos<ex>ter</ex>felden') == "Klosterfelden", "ex alone stays inside the word")
+    tr.assert_ok()
+
+
+def test_punctuation_after_an_abbreviation_is_not_doubled_and_the_reading_is_searchable():
+    import sqlite3
+    from build_db import init_db
+    tr = Checks()
+    tr.check(_flat('her hofmeis<choice><abbr>tˀ</abbr><expan>ter</expan></choice><reg>,</reg> den')
+             == "her hofmeistˀ hofmeister, den", "the comma follows the reading once")
+    tr.check(_flat('<persName>Bremgar<choice><abbr>tē</abbr><expan>ten</expan></choice></persName>, s')
+             == "Bremgartē Bremgarten, s", "a choice that ends an entity")
+    tr.check(_flat('Eichi b<choice><abbr>ˀg</abbr><expan>erg</expan></choice>, schulth')
+             == "Eichi bˀg berg, schulth", "a comma right after the choice is not part of the word")
+    con = init_db(":memory:")
+    text = _flat('min her hofmeis<choice><abbr>tˀ</abbr><expan>ter</expan></choice> begert')
+    con.execute("INSERT INTO entries(id,title,text_raw) VALUES('e1','t',?)", (text,))
+    hit = con.execute("SELECT id FROM fts_entries WHERE fts_entries MATCH '\"hofmeister\"'").fetchall()
+    tr.check([h[0] for h in hit] == ["e1"], "full text finds the abbreviated word by its reading")
+    tr.assert_ok()
+
+
 def test_malformed_record_does_not_truncate_register():
     """One bad record must be skipped, not abandon the rest of the register."""
     from build_db import parse_orgs, parse_people

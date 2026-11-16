@@ -288,6 +288,54 @@ anything that spans the fleet; in particular, the app's `--http-path` and the ng
 `location` have to be the same string, which is the rule a sub-path deployment turns
 on.
 
+### Where the process actually runs (since 30.09.2026)
+
+The public URL is tei's, the process is not. nginx on tei forwards `/mcp/kf/mcp` to
+`127.0.0.1:8001`, which is an SSH tunnel (`mcp-tunnel-nginx@8001.service` on tei) to
+**idhefix** (`srv`), where the server runs without Docker as a systemd **user** unit of
+`tobias`:
+
+| | on idhefix |
+|---|---|
+| unit | `mcp-kf.service` (`systemctl --user …`) |
+| process | `~/mcp/venv/bin/python server.py --db ~/mcp/data/kf.db --host 172.17.0.1 --port 8001 --http-path /mcp/kf/mcp` |
+| checkout | `~/mcp/kf_mcp` (this repository, `main`) |
+| venv | `~/mcp/venv`, shared with the sibling servers |
+| database | `~/mcp/data/kf.db` |
+| TEI sources | `~/mcp/data/koenigsfelden-data`, a clone of [Staatsarchiv-Aargau/koenigsfelden-data](https://github.com/Staatsarchiv-Aargau/koenigsfelden-data) at `32f6d17` |
+
+The Docker path above is the generic one; it is not what serves tei. In particular,
+`/home/dh/kf_data/kf.db` on tei is a leftover from before the move and is read by
+nothing — a rebuild there changes nothing anyone sees (learned 16.11.2026, when the
+first rebuild for #15 went into that file).
+
+**Rebuilding the database after a change to `build_db.py` or to the TEI**, on
+idhefix as `tobias` (about 15 s; the server reads the file per request, so stopping it
+is a courtesy, not a requirement):
+
+```bash
+cd ~/mcp/kf_mcp && git pull --ff-only
+systemctl --user stop mcp-kf.service
+cp ~/mcp/data/kf.db ~/mcp/data/kf.db.bak-$(date +%F)
+~/mcp/venv/bin/python build_db.py \
+  --docs ~/mcp/data/koenigsfelden-data/data/docs \
+  --registers ~/mcp/data/koenigsfelden-data/data/registers \
+  --db ~/mcp/data/kf.db
+systemctl --user start mcp-kf.service && systemctl --user is-active mcp-kf.service
+```
+
+Expect `Existing database: clearing 1,557 entries and rebuilding from source` and no
+`WARNING: … skipped`. Check from any MCP client: `get_entry("U-17_0828_02")` starts
+`Staatsarchiv AARGAU Unnsz₎ Unnszer andaͣchtig …` (two whole layers, #15), and
+`search_fulltext("hofmeister", limit=500)` returns well over 100 entries. To move to a
+newer edition commit, `git -C ~/mcp/data/koenigsfelden-data checkout <sha>` first and
+note the sha in the table above.
+
+`build_db.py` leaves the `chunks` and `embeddings` tables alone, so semantic search
+keeps the passages of the previous build until `embed_db.py` runs again (see
+[Semantic search](#semantic-search)); `reuse_vectors` keeps the vectors whose chunk
+text did not change.
+
 ## Tests
 
 ```bash
